@@ -1,0 +1,685 @@
+<script>
+(function () {
+  'use strict';
+
+  const FONT_ASSIGNMENTS_PATH = '/config/site-styles/fonts/assign-styles';
+  const COLOR_THEME_PATH = '/config/site-styles/colors/theme-editor';
+  const IMAGE_BLOCKS_PATH = '/config/site-styles/accessories/image-blocks';
+  const CONTROLLER_KEY = '__SQS_SITE_STYLES_SEARCH_ROUTE_DETECTOR__';
+  const BUILD_ID = 'site-styles-search-accordions-v8';
+  const POLL_INTERVAL_MS = 800;
+  const UI_ID = 'sn-site-styles-search';
+  const STYLE_ID = 'sn-site-styles-search-styles';
+  const INPUT_ID = 'sn-site-styles-search-input';
+  const COLLAPSE_BUTTON_ID = 'sn-site-styles-collapse-toggle';
+  const EMPTY_ID = 'sn-site-styles-search-empty';
+  const OWNED_ATTR = 'data-sn-site-styles-owned';
+  const SECTION_ATTR = 'data-sn-site-styles-section';
+  const HIDDEN_ATTR = 'data-sn-site-styles-hidden';
+  const ALL_COLLAPSED_ATTR = 'data-sn-site-styles-all-collapsed';
+
+  const ROUTES = [
+    {
+      path: FONT_ASSIGNMENTS_PATH,
+      kind: 'font-assignments',
+      placeholder: 'Search font assignments',
+      emptyMessage: 'No matching font assignments',
+      detectedMessage: '[Site Styles Search] Font assignment page detected.',
+      exitedMessage: '[Site Styles Search] Font assignment page exited.',
+    },
+    {
+      path: COLOR_THEME_PATH,
+      kind: 'color-theme',
+      placeholder: 'Search color settings',
+      emptyMessage: 'No matching color settings',
+      detectedMessage: '[Site Styles Search] Color theme editor detected.',
+      exitedMessage: '[Site Styles Search] Color theme editor exited.',
+    },
+    {
+      path: IMAGE_BLOCKS_PATH,
+      kind: 'image-blocks',
+      placeholder: 'Search image block settings',
+      emptyMessage: 'No matching image block settings',
+      detectedMessage: '[Site Styles Search] Image Blocks page detected.',
+      exitedMessage: '[Site Styles Search] Image Blocks page exited.',
+    },
+  ];
+
+  function normalizeText(value) {
+    return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function setHidden(element, hidden) {
+    if (hidden) element.setAttribute(HIDDEN_ATTR, '');
+    else element.removeAttribute(HIDDEN_ATTR);
+  }
+
+  class SiteStylesAssignmentInterface {
+    constructor(parentWindow, route) {
+      this.parentWindow = parentWindow;
+      this.document = parentWindow.document;
+      this.route = route;
+      this.root = null;
+      this.groups = [];
+      this.searchRoot = null;
+      this.collapseButton = null;
+      this.styleElement = null;
+      this.observer = null;
+      this.rescanHandle = null;
+      this.isRehydrating = false;
+      this.query = '';
+      this.collapsedSections = new Set();
+    }
+
+    discover() {
+      if (!this.document) return null;
+
+      if (this.route.kind === 'color-theme') return this.discoverColorTheme();
+      if (this.route.kind === 'image-blocks') return this.discoverImageBlocks();
+      return this.discoverFontAssignments();
+    }
+
+    discoverFontAssignments() {
+      const heading = [...this.document.querySelectorAll('h1')]
+        .find((element) => element.textContent.trim() === 'Assign Styles');
+      const main = heading?.closest('main');
+      if (!main) return null;
+
+      const candidateGroups = [...main.querySelectorAll('label')].map((label) => {
+        const container = label.parentElement;
+        const children = container ? [...container.children] : [];
+        if (children[0] !== label) return null;
+        const rowElements = children.slice(1);
+        if (!rowElements.length || !rowElements.every((child) => child.tagName === 'BUTTON')) {
+          return null;
+        }
+
+        const rows = rowElements.map((button) => {
+          const paragraphs = [...button.querySelectorAll('p')];
+          if (paragraphs.length < 2) return null;
+          const title = normalizeText(paragraphs[0].textContent);
+          return title ? { element: button, title } : null;
+        });
+        if (rows.some((row) => !row)) return null;
+
+        const key = normalizeText(label.textContent);
+        if (!key) return null;
+        return { key, container, label, rows };
+      });
+
+      return this.finishDiscovery(heading, main, candidateGroups);
+    }
+
+    discoverColorTheme() {
+      const heading = [...this.document.querySelectorAll('h1')]
+        .find((element) => element.textContent.trim() === 'Edit Color Theme');
+      const main = heading?.closest('main');
+      if (!main) return null;
+
+      const firstGroup = [...main.querySelectorAll('h3')]
+        .map((label) => this.readColorThemeGroup(label.parentElement))
+        .find((group) => group);
+      const list = firstGroup?.container.parentElement;
+      if (!list) return null;
+
+      const candidateGroups = [...list.children]
+        .map((container) => this.readColorThemeGroup(container));
+
+      return this.finishDiscovery(heading, main, candidateGroups);
+    }
+
+    readColorThemeGroup(container) {
+      const children = container ? [...container.children] : [];
+      const label = children[0];
+      if (label?.tagName !== 'H3') return null;
+      const rowElements = children.slice(1);
+      if (!rowElements.length || !rowElements.every((child) => child.tagName === 'DIV')) {
+        return null;
+      }
+
+      const rows = rowElements.map((element) => {
+        const directButtons = [...element.children]
+          .filter((child) => child.tagName === 'BUTTON');
+        if (element.children.length !== 1 || directButtons.length !== 1) return null;
+        const paragraphs = [...directButtons[0].querySelectorAll('p')];
+        if (paragraphs.length !== 1) return null;
+        const title = normalizeText(paragraphs[0].textContent);
+        return title ? { element, title } : null;
+      });
+      if (rows.some((row) => !row)) return null;
+
+      const key = normalizeText(label.textContent);
+      if (!key) return null;
+      return { key, container, label, rows };
+    }
+
+    discoverImageBlocks() {
+      const heading = [...this.document.querySelectorAll('h1')]
+        .find((element) => element.textContent.trim() === 'Image Blocks');
+      const main = heading?.closest('main');
+      if (!main) return null;
+
+      const firstLabel = [...main.querySelectorAll('h2')]
+        .find((element) => element.textContent.trim().startsWith('Image Block:'));
+      const list = firstLabel?.parentElement;
+      if (!list) return null;
+
+      const groups = [];
+      let currentGroup = null;
+      for (const element of [...list.children]) {
+        if (element.tagName === 'H2') {
+          const labelText = element.textContent.trim();
+          if (!labelText.startsWith('Image Block:')) return null;
+          if (currentGroup && !currentGroup.rows.length) return null;
+          currentGroup = {
+            key: normalizeText(labelText),
+            container: element,
+            label: element,
+            rows: [],
+          };
+          groups.push(currentGroup);
+          continue;
+        }
+
+        if (element.tagName !== 'DIV' || !currentGroup) return null;
+        const paragraphs = [...element.querySelectorAll('p')];
+        const title = normalizeText(paragraphs[0]?.textContent);
+        const hasInput = element.querySelectorAll('input').length > 0;
+        const hasCombobox = [...element.querySelectorAll('div')]
+          .some((child) => child.getAttribute('role') === 'combobox');
+        if (!title || (!hasInput && !hasCombobox)) return null;
+        currentGroup.rows.push({ element, title });
+      }
+
+      if (currentGroup && !currentGroup.rows.length) return null;
+      return this.finishDiscovery(heading, main, groups);
+    }
+
+    finishDiscovery(heading, main, candidateGroups) {
+      if (!candidateGroups.length || candidateGroups.some((group) => !group)) return null;
+
+      const groups = candidateGroups;
+      const list = groups[0].container.parentElement;
+      if (!list || !groups.every((group) => group.container.parentElement === list)) return null;
+
+      return { heading, main, list, groups };
+    }
+
+    mount() {
+      const discovery = this.discover();
+      if (!discovery) return false;
+      const mountTargets = this.findMountTargets();
+      if (!mountTargets) return false;
+
+      this.root = discovery.main;
+      this.groups = discovery.groups;
+      this.mountStyles(mountTargets.style);
+      this.mountSearch(discovery.list, mountTargets.searchRoot);
+      this.groups.forEach((group) => this.enhanceGroup(group));
+      this.applyVisibility();
+      this.observeRoot();
+      return true;
+    }
+
+    unmount({ preserveState = true } = {}) {
+      this.observer?.disconnect();
+      this.observer = null;
+      if (this.rescanHandle !== null) {
+        this.parentWindow.clearTimeout(this.rescanHandle);
+        this.rescanHandle = null;
+      }
+      if (this.searchRoot?.hasAttribute(OWNED_ATTR)) this.searchRoot.remove();
+      this.searchRoot = null;
+      this.collapseButton = null;
+      if (this.styleElement?.hasAttribute(OWNED_ATTR)) this.styleElement.remove();
+      this.styleElement = null;
+      this.groups.forEach((group) => this.restoreGroup(group));
+      this.groups = [];
+      this.root = null;
+
+      if (!preserveState) {
+        this.query = '';
+        this.collapsedSections.clear();
+      }
+    }
+
+    destroy() {
+      this.unmount({ preserveState: false });
+    }
+
+    findMountTargets() {
+      const style = this.document.getElementById(STYLE_ID);
+      if (style && (style.tagName !== 'STYLE' || !style.hasAttribute(OWNED_ATTR))) {
+        return null;
+      }
+
+      const searchRoot = this.document.getElementById(UI_ID);
+      if (searchRoot && !this.isReusableSearchRoot(searchRoot)) return null;
+
+      return { searchRoot, style };
+    }
+
+    isReusableSearchRoot(root) {
+      if (root.tagName !== 'DIV' || !root.hasAttribute(OWNED_ATTR)) return false;
+      if (root.children.length !== 3) return false;
+      const [input, collapseButton, empty] = root.children;
+      return input.tagName === 'INPUT'
+        && input.id === INPUT_ID
+        && collapseButton.tagName === 'BUTTON'
+        && collapseButton.id === COLLAPSE_BUTTON_ID
+        && empty.tagName === 'P'
+        && empty.id === EMPTY_ID;
+    }
+
+    mountStyles(existingStyle) {
+      let style = existingStyle;
+      if (!style) {
+        style = this.document.createElement('style');
+        style.id = STYLE_ID;
+        style.setAttribute(OWNED_ATTR, '');
+        this.document.head.append(style);
+      }
+      style.textContent = `
+#${UI_ID} {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  margin-top: 8px;
+  padding: 0 0 10px;
+  background: #fff;
+}
+#${INPUT_ID} {
+  box-sizing: border-box;
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid #cfcfcf;
+  border-radius: 4px;
+  background: #fff;
+  color: #3e3e3e;
+}
+#${INPUT_ID}::placeholder {
+  color: #737373;
+  opacity: 1;
+}
+#${INPUT_ID}:focus {
+  border-color: #3e3e3e;
+  outline: 2px solid rgba(62, 62, 62, 0.18);
+  outline-offset: 1px;
+}
+#${COLLAPSE_BUTTON_ID} {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-sizing: border-box;
+  height: auto;
+  margin-top: 0;
+  margin-bottom: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  white-space: nowrap;
+  cursor: pointer;
+}
+#${COLLAPSE_BUTTON_ID}::after {
+  content: '›';
+  display: inline-block;
+  font-size: 18px;
+  line-height: 1;
+  transform: rotate(90deg);
+}
+#${COLLAPSE_BUTTON_ID}[${ALL_COLLAPSED_ATTR}]::after {
+  transform: rotate(0deg);
+}
+#${COLLAPSE_BUTTON_ID}:focus {
+  outline: 2px solid rgba(62, 62, 62, 0.18);
+  outline-offset: 1px;
+}
+#${COLLAPSE_BUTTON_ID}[disabled] {
+  opacity: 0.45;
+  cursor: default;
+}
+#${EMPTY_ID} {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+[${HIDDEN_ATTR}] {
+  display: none !important;
+}
+[${SECTION_ATTR}] {
+  cursor: pointer;
+}
+[data-sn-site-styles-indicator]::before {
+  content: '›';
+  display: inline-block;
+  margin-left: 8px;
+  transform: rotate(90deg);
+}
+[${SECTION_ATTR}][aria-expanded='false']
+  [data-sn-site-styles-indicator]::before {
+  transform: rotate(0deg);
+}`;
+      this.styleElement = style;
+    }
+
+    mountSearch(list, existingRoot) {
+      let root = existingRoot;
+      if (!root) {
+        root = this.document.createElement('div');
+        root.id = UI_ID;
+        root.setAttribute(OWNED_ATTR, '');
+
+        const input = this.document.createElement('input');
+        input.id = INPUT_ID;
+        input.type = 'search';
+        input.placeholder = this.route.placeholder;
+        input.setAttribute('aria-label', this.route.placeholder);
+        input.addEventListener('input', this.handleSearchInput);
+
+        const collapseButton = this.document.createElement('button');
+        collapseButton.id = COLLAPSE_BUTTON_ID;
+        collapseButton.type = 'button';
+        collapseButton.textContent = 'Collapse all';
+        collapseButton.addEventListener('click', this.handleCollapseAll);
+
+        const empty = this.document.createElement('p');
+        empty.id = EMPTY_ID;
+        empty.textContent = this.route.emptyMessage;
+        empty.setAttribute(HIDDEN_ATTR, '');
+
+        root.append(input, collapseButton, empty);
+        list.parentElement.insertBefore(root, list);
+      }
+
+      const input = root.children[0];
+      const collapseButton = root.children[1];
+      const labelClass = this.groups[0]?.label.getAttribute('class');
+      if (labelClass) collapseButton.setAttribute('class', labelClass);
+      else collapseButton.removeAttribute('class');
+      input.value = this.query;
+      this.searchRoot = root;
+      this.collapseButton = collapseButton;
+    }
+
+    observeRoot() {
+      if (!this.parentWindow.MutationObserver || !this.root) return;
+      this.observer?.disconnect();
+      this.observer = new this.parentWindow.MutationObserver(() => {
+        this.scheduleRehydrate();
+      });
+      this.observer.observe(this.root, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+    }
+
+    scheduleRehydrate() {
+      if (this.rescanHandle !== null) return;
+      this.rescanHandle = this.parentWindow.setTimeout(() => {
+        this.rescanHandle = null;
+        this.rehydrate();
+      }, 0);
+    }
+
+    rehydrate() {
+      if (this.isRehydrating) return;
+      this.isRehydrating = true;
+      try {
+        const discovery = this.discover();
+        if (!discovery) return;
+        const mountTargets = this.findMountTargets();
+        if (!mountTargets) return;
+
+        const groupsChanged = discovery.groups.length !== this.groups.length
+          || discovery.groups.some((group, groupIndex) => {
+            const current = this.groups[groupIndex];
+            return group.container !== current?.container
+              || group.label !== current?.label
+              || group.key !== current?.key
+              || !group.label.hasAttribute(SECTION_ATTR)
+              || current?.indicator?.parentElement !== group.label
+              || group.rows.length !== current?.rows.length
+              || group.rows.some((row, rowIndex) => (
+                row.element !== current.rows[rowIndex]?.element
+                || row.title !== current.rows[rowIndex]?.title
+              ));
+          });
+        const searchMissing = !mountTargets.searchRoot;
+        const styleMissing = !mountTargets.style;
+        if (!groupsChanged && !searchMissing && !styleMissing) return;
+
+        this.observer?.disconnect();
+        this.observer = null;
+        this.groups.forEach((group) => this.restoreGroup(group));
+        this.groups = discovery.groups;
+        this.root = discovery.main;
+        this.mountStyles(mountTargets.style);
+        this.mountSearch(discovery.list, mountTargets.searchRoot);
+        this.groups.forEach((group) => this.enhanceGroup(group));
+        this.applyVisibility();
+        this.observeRoot();
+      } finally {
+        this.isRehydrating = false;
+      }
+    }
+
+    handleSearchInput = (event) => {
+      this.setQuery(event.currentTarget.value);
+    };
+
+    handleCollapseAll = () => {
+      if (this.query) return;
+
+      const allCollapsed = this.groups.length > 0
+        && this.groups.every((group) => this.collapsedSections.has(group.key));
+      if (allCollapsed) this.collapsedSections.clear();
+      else this.groups.forEach((group) => this.collapsedSections.add(group.key));
+      this.applyVisibility();
+    };
+
+    setQuery(value) {
+      this.query = normalizeText(value);
+      this.applyVisibility();
+    }
+
+    enhanceGroup(group) {
+      if (group.label.hasAttribute(SECTION_ATTR)) return;
+
+      group.nativeLabelAttributes = ['role', 'tabindex', 'aria-expanded'].map((name) => ({
+        name,
+        present: group.label.hasAttribute(name),
+        value: group.label.getAttribute(name),
+      }));
+      group.handleToggle = () => this.toggleGroup(group.key);
+      group.handleKeydown = (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        this.toggleGroup(group.key);
+      };
+
+      const indicator = this.document.createElement('span');
+      indicator.setAttribute('data-sn-site-styles-indicator', '');
+      indicator.setAttribute('aria-hidden', 'true');
+      group.indicator = indicator;
+
+      group.label.setAttribute(SECTION_ATTR, '');
+      group.label.setAttribute('role', 'button');
+      group.label.setAttribute('tabindex', '0');
+      group.label.addEventListener('click', group.handleToggle);
+      group.label.addEventListener('keydown', group.handleKeydown);
+      group.label.append(indicator);
+    }
+
+    toggleGroup(key) {
+      if (this.collapsedSections.has(key)) this.collapsedSections.delete(key);
+      else this.collapsedSections.add(key);
+      this.applyVisibility();
+    }
+
+    applyVisibility() {
+      let visibleGroupCount = 0;
+      for (const group of this.groups) {
+        const labelMatches = Boolean(this.query) && group.key.includes(this.query);
+        const rowMatches = group.rows.map((row) => !this.query || row.title.includes(this.query));
+        const groupMatches = !this.query || labelMatches || rowMatches.some(Boolean);
+        const forcedOpen = Boolean(this.query) && groupMatches;
+        const collapsed = !forcedOpen && this.collapsedSections.has(group.key);
+
+        setHidden(group.container, !groupMatches);
+        group.label.setAttribute('aria-expanded', String(!collapsed));
+        group.rows.forEach((row, index) => {
+          const filteredOut = !groupMatches || (!labelMatches && !rowMatches[index]);
+          setHidden(row.element, filteredOut || collapsed);
+        });
+        if (groupMatches) visibleGroupCount += 1;
+      }
+
+      const empty = this.document.getElementById(EMPTY_ID);
+      setHidden(empty, !this.query || visibleGroupCount > 0);
+
+      const allCollapsed = this.groups.length > 0
+        && this.groups.every((group) => this.collapsedSections.has(group.key));
+      this.collapseButton.textContent = allCollapsed ? 'Expand all' : 'Collapse all';
+      if (allCollapsed) this.collapseButton.setAttribute(ALL_COLLAPSED_ATTR, '');
+      else this.collapseButton.removeAttribute(ALL_COLLAPSED_ATTR);
+      if (this.query) this.collapseButton.setAttribute('disabled', '');
+      else this.collapseButton.removeAttribute('disabled');
+    }
+
+    restoreGroup(group) {
+      group.label.removeEventListener('click', group.handleToggle);
+      group.label.removeEventListener('keydown', group.handleKeydown);
+      group.indicator?.remove();
+      group.label.removeAttribute(SECTION_ATTR);
+      group.nativeLabelAttributes?.forEach(({ name, present, value }) => {
+        if (present) group.label.setAttribute(name, value);
+        else group.label.removeAttribute(name);
+      });
+      group.container.removeAttribute(HIDDEN_ATTR);
+      group.rows.forEach((row) => row.element.removeAttribute(HIDDEN_ATTR));
+    }
+  }
+
+  class SiteStylesRouteDetector {
+    constructor(parentWindow) {
+      this.parentWindow = parentWindow;
+      this.buildId = BUILD_ID;
+      this.lastPathname = null;
+      this.activePathname = null;
+      this.pollHandle = null;
+      this.routes = new Map(ROUTES.map((route) => [
+        route.path,
+        {
+          route,
+          assignmentInterface: new SiteStylesAssignmentInterface(parentWindow, route),
+        },
+      ]));
+    }
+
+    init(initialPathname) {
+      if (this.pollHandle !== null) {
+        return;
+      }
+
+      this.lastPathname = initialPathname;
+      this.handleLocationChange(initialPathname);
+      this.pollHandle = this.parentWindow.setInterval(() => {
+        let pathname;
+
+        try {
+          pathname = this.parentWindow.location.pathname;
+        } catch (_error) {
+          return;
+        }
+
+        if (pathname === this.lastPathname) {
+          const activeRoute = this.routes.get(this.activePathname);
+          if (activeRoute && !activeRoute.assignmentInterface.root) {
+            activeRoute.assignmentInterface.mount();
+          }
+          return;
+        }
+
+        this.lastPathname = pathname;
+        this.handleLocationChange(pathname);
+      }, POLL_INTERVAL_MS);
+    }
+
+    handleLocationChange(pathname) {
+      const nextRoute = this.routes.get(pathname) || null;
+
+      if ((nextRoute?.route.path || null) === this.activePathname) return;
+
+      const previousRoute = this.routes.get(this.activePathname) || null;
+      if (previousRoute) {
+        previousRoute.assignmentInterface.unmount({ preserveState: true });
+        this.log(previousRoute.route.exitedMessage);
+      }
+
+      this.activePathname = nextRoute?.route.path || null;
+      if (nextRoute) {
+        nextRoute.assignmentInterface.mount();
+        this.log(nextRoute.route.detectedMessage);
+      }
+    }
+
+    log(message) {
+      const parentConsole = this.parentWindow.console;
+
+      if (parentConsole && typeof parentConsole.log === 'function') {
+        parentConsole.log(message);
+      }
+    }
+
+    destroy() {
+      if (this.pollHandle !== null) {
+        this.parentWindow.clearInterval(this.pollHandle);
+        this.pollHandle = null;
+      }
+
+      this.activePathname = null;
+      this.lastPathname = null;
+      for (const { assignmentInterface } of this.routes.values()) {
+        assignmentInterface.destroy();
+      }
+
+      if (this.parentWindow[CONTROLLER_KEY] === this) {
+        delete this.parentWindow[CONTROLLER_KEY];
+      }
+    }
+  }
+
+  try {
+    if (window.top === window.self) {
+      return;
+    }
+
+    const parentWindow = window.top;
+    const initialPathname = parentWindow.location.pathname;
+
+    const existingController = parentWindow[CONTROLLER_KEY];
+    if (existingController) {
+      if (existingController.buildId === BUILD_ID) return;
+      if (typeof existingController.destroy !== 'function') return;
+
+      existingController.destroy();
+      if (parentWindow[CONTROLLER_KEY] === existingController) {
+        delete parentWindow[CONTROLLER_KEY];
+      }
+      if (parentWindow[CONTROLLER_KEY]) return;
+    }
+
+    const detector = new SiteStylesRouteDetector(parentWindow);
+    parentWindow[CONTROLLER_KEY] = detector;
+    detector.init(initialPathname);
+  } catch (_error) {
+    // The raw script is inert when the parent editor window is inaccessible.
+  }
+})();
+</script>
