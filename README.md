@@ -1,4 +1,4 @@
-# Squarespace Site Styles Search
+# Site Styles Search
 
 Adds search and collapsible sections to selected Squarespace Site Styles panels.
 
@@ -15,13 +15,13 @@ The search matches section headings and individual setting labels. Assigned valu
 Add this to **Settings → Advanced → Code Injection → Footer**:
 
 ```html
-<script src="https://cdn.jsdelivr.net/gh/bergendesignco/squarespace-site-styles-search@v0.1.0/site-styles-search.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/bergendesignco/site-styles-search@v0.1.0/site-styles-search.js"></script>
 ```
 
 The versioned URL above is recommended for live sites because it stays fixed. For testing the latest commit from `main`, use:
 
 ```html
-<script src="https://cdn.jsdelivr.net/gh/bergendesignco/squarespace-site-styles-search@main/site-styles-search.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/bergendesignco/site-styles-search@main/site-styles-search.js"></script>
 ```
 
 To install the complete script inline instead, copy all of [`site-styles-search.html`](site-styles-search.html) into Footer Code Injection.
@@ -34,4 +34,3 @@ npm run build:code-injection
 ```
 
 `site-styles-search.js` is the source file. The build command regenerates the paste-ready HTML file.
-
